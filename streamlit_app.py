@@ -1,181 +1,261 @@
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException
-from random import randint
-import time
+from datetime import datetime, time as datetime_time, timedelta
+from zoneinfo import ZoneInfo
 
-# Page Configuration
-st.set_page_config(
-    page_title="Feedback Automation",
-    page_icon="📝",
-    layout="centered"
+from automation import FeedbackUnavailableError, run_feedback
+from database import (
+    authenticate_saved_account,
+    count_unread_notifications,
+    create_feedback_schedule,
+    create_notification,
+    get_account_email,
+    initialize_database,
+    list_feedback_schedules,
+    list_notifications,
+    load_saved_credentials_by_id,
+    mark_notifications_read,
+    save_account_email,
+    save_credentials,
+    validate_encryption_key,
 )
+from notification_delivery import notify_feedback_outcome
+from settings import load_streamlit_secrets
 
-st.title("📝 Feedback Automation")
-st.markdown("Automate your PSG Tech feedback submission")
 
-# Input fields
-rollno = st.text_input("Roll Number", placeholder="e.g., 23z309")
-password = st.text_input("Password", type="password")
+LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
+st.set_page_config(page_title="Feedback Automation", page_icon="📝", layout="centered")
+
+
+@st.cache_resource
+def _initialize_storage() -> None:
+    validate_encryption_key()
+    initialize_database()
+
+try:
+    app_secrets = st.secrets
+except Exception:
+    app_secrets = {}
+load_streamlit_secrets(app_secrets)
+try:
+    _initialize_storage()
+except RuntimeError as error:
+    st.error(f"Configuration error: {error}")
+    st.stop()
+except Exception:
+    st.error("Could not connect to the configured database. Check its URL and availability.")
+    st.stop()
+
+
+def _sign_in() -> None:
+    roll_number = st.session_state.get("login_roll_number", "").strip()
+    password = st.session_state.pop("login_password", "")
+    account = authenticate_saved_account(roll_number, password)
+    if account is None:
+        st.session_state["auth_error"] = "Roll number or password was not recognized."
+        return
+    st.session_state["credential_id"], st.session_state["roll_number"] = account
+    st.session_state.pop("auth_error", None)
+
+
+def _create_profile() -> None:
+    roll_number = st.session_state.get("new_roll_number", "").strip()
+    password = st.session_state.pop("new_password", "")
+    email = st.session_state.get("new_email", "").strip() or None
+    if not st.session_state.get("store_consent", False):
+        st.session_state["auth_error"] = "Consent is required to save encrypted credentials."
+        return
+    try:
+        credential_id = save_credentials(roll_number, password, email=email)
+    except Exception as error:
+        st.session_state["auth_error"] = str(error)
+        return
+    st.session_state["credential_id"] = credential_id
+    st.session_state["roll_number"] = roll_number
+    st.session_state.pop("auth_error", None)
+
+
+if "credential_id" not in st.session_state:
+    st.title("📝 Feedback Automation")
+    st.caption("Sign in to view your feedback status and notifications.")
+    with st.form("sign_in_form"):
+        st.text_input("Roll Number", placeholder="e.g., 23z309", key="login_roll_number")
+        st.text_input("Password", type="password", key="login_password")
+        st.form_submit_button("Sign in", type="primary", on_click=_sign_in)
+
+    with st.expander("Create a local profile"):
+        st.caption("Your roll number and password are encrypted and used for eCampus automation.")
+        with st.form("create_profile_form"):
+            st.text_input("Roll Number", key="new_roll_number")
+            st.text_input("Password", type="password", key="new_password")
+            st.text_input(
+                "Email notifications (optional)",
+                placeholder="student@example.edu",
+                key="new_email",
+            )
+            st.checkbox(
+                "I consent to saving these credentials and optional email encrypted.",
+                key="store_consent",
+            )
+            st.form_submit_button("Create profile", on_click=_create_profile)
+
+    if error_message := st.session_state.get("auth_error"):
+        st.error(error_message)
+    st.stop()
+
+
+credential_id = st.session_state["credential_id"]
+roll_number = st.session_state["roll_number"]
+account_email = get_account_email(credential_id)
+notifications = list_notifications(credential_id)
+unread_count = count_unread_notifications(credential_id)
+feedback_notifications = [
+    notification
+    for notification in notifications
+    if notification[1]
+    in {"feedback_completed", "feedback_failed", "feedback_form_not_found"}
+]
+
+status_columns = st.columns([6, 1, 1])
+with status_columns[0]:
+    with st.container(border=True):
+        if feedback_notifications:
+            latest = feedback_notifications[0]
+            if latest[1] == "feedback_completed":
+                st.success("Your feedback has been successfully completed.")
+            elif latest[1] == "feedback_form_not_found":
+                st.warning("Feedback was not completed: no intermediate form was found.")
+            elif latest[1] == "feedback_failed":
+                st.error("Your feedback has not been successfully completed.")
+            else:
+                st.info(latest[3])
+        else:
+            st.info("No feedback activity yet.")
+
+with status_columns[1]:
+    with st.popover(f"🔔 {unread_count}"):
+        st.subheader("Notifications")
+        if notifications:
+            for _, _, title, message, created_at, read_at, email_status in notifications:
+                st.markdown(f"**{title}**")
+                st.write(message)
+                email_label = {
+                    "sent": "Email sent",
+                    "failed": "Email failed",
+                    "not_configured": "Email not configured",
+                    "pending": "Email pending",
+                    "not_requested": "In-app only",
+                }[email_status]
+                st.caption(
+                    f"{created_at} UTC · {email_label}"
+                    + (" · Read" if read_at else " · New")
+                )
+                st.divider()
+        else:
+            st.caption("No notifications yet.")
+        if unread_count and st.button("Mark all as read", key="mark_notifications_read"):
+            mark_notifications_read(credential_id)
+            st.rerun()
+
+with status_columns[2]:
+    with st.popover(f"👤 {roll_number}"):
+        st.caption("Signed in as")
+        st.markdown(f"**{roll_number}**")
+        with st.form(f"email_settings_{credential_id}"):
+            email_value = st.text_input(
+                "Email notifications",
+                value=account_email or "",
+                placeholder="student@example.edu",
+            )
+            if st.form_submit_button("Save email"):
+                try:
+                    save_account_email(credential_id, email_value)
+                except Exception as error:
+                    st.error(str(error))
+                else:
+                    st.success("Email address saved encrypted.")
+        if st.button("Sign out", key="sign_out"):
+            st.session_state.pop("credential_id", None)
+            st.session_state.pop("roll_number", None)
+            st.rerun()
+
+st.title("Feedback Automation")
 feedback_type = st.selectbox(
     "Feedback Type",
     options=[("End Semester Feedback", 0), ("Intermediate Feedback", 1)],
-    format_func=lambda x: x[0]
+    format_func=lambda option: option[0],
 )
 
-def createDriver():
-    # Set up Selenium Chrome options
-    options = webdriver.ChromeOptions()
-    options.binary_location = "/usr/bin/chromium"
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-gpu")
-
-    # Start WebDriver
-    service = Service("/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=options)
-    
-    return driver
-
-def intermediateForm(browser):
-    progress_bar = st.progress(0, text="Fetching feedback page...")
-    
-    # Get the courses
-    courses = browser.find_elements(By.CLASS_NAME, "intermediate-body")
-
-    if len(courses) == 0:
-        progress_bar.empty()
-        st.warning("No intermediate feedback courses found.")
-        browser.quit()
-        return
-    
-    # Instantiate a wait sequence for page rendering
-    wait = WebDriverWait(browser, 10)
-    
-    # Iterate through the courses
-    for course in range(len(courses)):
-        courses = browser.find_elements(By.CLASS_NAME, "intermediate-body")
-        course_names = browser.find_elements(By.CSS_SELECTOR, "h6.course")
-        progress_bar.progress((course)/len(courses), text=course_names[course].text + "...")  
-        browser.execute_script("arguments[0].scrollIntoView(); arguments[0].click();", courses[course])
-        
-        questions_text = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.bottom-0"))).text
-        questions = int(questions_text.split()[-1])
-        
-        clicks = 0
-        while clicks < questions:
-            try:
-                radio_button = wait.until(EC.element_to_be_clickable((By.XPATH, f"//label[@for='radio-{clicks+1}-1']")))
-                browser.execute_script("arguments[0].click();", radio_button)
-                clicks += 1
-                next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='carousel-control-next']")))
-                browser.execute_script("arguments[0].click();", next_btn)
-            except StaleElementReferenceException:
-                continue
-            
-        back = browser.find_element(By.CLASS_NAME, "overlay")
-        progress_bar.progress((course+1)/len(courses), text=course_names[course].text + "...")
-        browser.execute_script("arguments[0].click();", back)
-    
-    browser.quit()
-    progress_bar.empty()
-    st.markdown("##### Done! Check your [studzone](https://ecampus.psgtech.ac.in/studzone)!")
-
-def endsemForm(browser):
-    progress_bar = st.progress(0, text="Fetching feedback page...")
-    
-    wait = WebDriverWait(browser, 10)
+if st.button("🚀 Submit Feedback", type="primary"):
+    roll_number, password = load_saved_credentials_by_id(credential_id)
     try:
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.staff-item")))
-    except:
-        browser.quit()
-        st.error("Could not find the list of staff for feedback.")
-        return
-        
-    staffList = browser.find_elements(By.CSS_SELECTOR, "div.staff-item")
-    
-    for staff in range(len(staffList)):
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.staff-item")))
-        staffList = browser.find_elements(By.CSS_SELECTOR, "div.staff-item")
-        browser.execute_script("arguments[0].scrollIntoView();arguments[0].click()", staffList[staff])
-        
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "span.ms-1")))
-        course_name = browser.find_elements(By.CSS_SELECTOR, "span.ms-1")[1].text
-        progress_bar.progress((staff/len(staffList)), text=course_name + "...")
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//tbody[@id='feedbackTableBody']/tr[1]/td[@class='rating-cell']/div[@class='star-rating']/label[1]")))
-        
-        review_list = browser.find_elements(By.CSS_SELECTOR, "td.question-cell")
-        for count in range(1, len(review_list) + 1):
-            star_button = browser.find_element(By.XPATH, f"//tbody[@id='feedbackTableBody']/tr[{count}]/td[@class='rating-cell']/div[@class='star-rating']/label[{randint(1,2)}]")
-            browser.execute_script("arguments[0].scrollIntoView();arguments[0].click()", star_button)
-        
-        submit_button = browser.find_element(By.ID, "btnSave")
-        browser.execute_script("arguments[0].scrollIntoView();arguments[0].click()", submit_button)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "img.img-fluid")))
-        progress_bar.progress(((staff+1)/len(staffList)), text=course_name + "...")
-        time.sleep(1) # Small delay between submissions
-        
-    final_submit_button = browser.find_element(By.ID, "btnFinalSubmit")
-    browser.execute_script("arguments[0].scrollIntoView();arguments[0].click()", final_submit_button)
-    
-    browser.quit()
-    progress_bar.empty()
-    st.markdown("##### Done! Check your [studzone](https://ecampus.psgtech.ac.in/studzone)!")
+        run_feedback(feedback_type[1], roll_number, password)
+    except FeedbackUnavailableError:
+        notify_feedback_outcome(
+            credential_id,
+            "feedback_form_not_found",
+            "Intermediate feedback form not found",
+            "No intermediate feedback form was available. Choose a valid availability date and schedule again.",
+            feedback_type[1],
+        )
+    except Exception:
+        notify_feedback_outcome(
+            credential_id,
+            "feedback_failed",
+            "Feedback was not completed",
+            "Automation could not complete this feedback. Check the feedback type and try again.",
+            feedback_type[1],
+        )
+    else:
+        notify_feedback_outcome(
+            credential_id,
+            "feedback_completed",
+            "Feedback completed",
+            "Your feedback has been successfully completed and submitted.",
+            feedback_type[1],
+        )
+    st.rerun()
 
-def autoFeedback(index, rollno, password):
-    # Create a webdriver
-    progress_bar = st.progress(0, text="Fetching feedback page...")
-    browser = createDriver()
-    wait = WebDriverWait(browser, 10)
-    
+st.divider()
+st.subheader("Schedule Feedback")
+schedule_date = st.date_input(
+    "Feedback availability date (runs at 10:00 AM IST)",
+    value=datetime.now(LOCAL_TIMEZONE).date() + timedelta(days=1),
+    min_value=datetime.now(LOCAL_TIMEZONE).date(),
+)
+scheduled_at = datetime.combine(schedule_date, datetime_time(10, 0), tzinfo=LOCAL_TIMEZONE)
+
+if st.button("🗓️ Schedule Feedback"):
     try:
-        browser.get("https://ecampus.psgtech.ac.in/studzone")
-        
-        # Fill out the credentials
-        rollno_field = wait.until(EC.presence_of_element_located((By.ID, "rollno")))
-        rollno_field.send_keys(rollno)
+        schedule_id = create_feedback_schedule(
+            credential_id, feedback_type[1], scheduled_at
+        )
+    except ValueError as error:
+        st.error(str(error))
+    else:
+        create_notification(
+            credential_id,
+            "schedule_created",
+            "Feedback scheduled",
+            f"Your feedback is scheduled for {scheduled_at:%d %B %Y at %I:%M %p} IST.",
+            schedule_id,
+        )
+        st.rerun()
 
-        password_field = browser.find_element(By.ID, "password")
-        password_field.send_keys(password)
-
-        checkbox = browser.find_element(By.ID, "terms")
-        browser.execute_script("arguments[0].click();", checkbox)
-
-        login_button = browser.find_element(By.ID, "btnLogin")
-        browser.execute_script("arguments[0].click();", login_button)
-        
-        # Get the feedback index page
-        feedback_card = wait.until(EC.element_to_be_clickable((By.XPATH, f"//h5[text()='Feedback']")))
-        browser.execute_script("arguments[0].scrollIntoView();arguments[0].click();", feedback_card)
-        
-        wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "card-body")))
-        feedbacks = browser.find_elements(By.CLASS_NAME, "card-body")
-        
-        # Click the desired feedback
-        browser.execute_script("arguments[0].click();", feedbacks[index])
-        
-        progress_bar.empty()
-        if index == 0:
-            endsemForm(browser)
-        else:
-            intermediateForm(browser)
-        return True
-    except Exception as e:
-        if browser:
-            browser.quit()
-        st.error(f"❌ Automation Error: {str(e)}")
-        return False
-
-# Submit button logic
-if st.button("🚀 Submit Feedback", type="primary", disabled=not (rollno and password)):
-    with st.spinner("Running automation..."):
-        autoFeedback(feedback_type[1], rollno, password)
-
-st.markdown("---")
-st.caption("⚠️ This tool is for educational purposes only. Use responsibly.")
+schedule_rows = list_feedback_schedules(credential_id)
+if schedule_rows:
+    st.dataframe(
+        [
+            {
+                "Job": job_id,
+                "Feedback": "End Semester" if kind == 0 else "Intermediate",
+                "Scheduled (IST)": datetime.fromisoformat(scheduled_at_utc)
+                .astimezone(LOCAL_TIMEZONE)
+                .strftime("%Y-%m-%d %H:%M"),
+                "Status": status,
+                "Result": result,
+            }
+            for job_id, kind, scheduled_at_utc, status, result in schedule_rows
+        ],
+        hide_index=True,
+        width="stretch",
+    )
