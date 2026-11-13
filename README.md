@@ -98,6 +98,11 @@ they would not see each other's schedules.
 GitHub can start scheduled workflows later than their cron minute; the worker
 processes every job due by the time it starts.
 
+The `.github/workflows/keep-streamlit-awake.yml` workflow requests the deployed
+Streamlit URL every hour to reduce Community Cloud inactivity hibernation. It
+also supports manual dispatch. This is a best-effort keep-alive; hosting
+platform policies can still suspend or restart the app.
+
 ## Notifications and email
 
 Notifications are stored per account and remain available in the app when email

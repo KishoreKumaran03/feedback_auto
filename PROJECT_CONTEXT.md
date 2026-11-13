@@ -13,6 +13,8 @@ can change.
 - The two feedback type values are `0` for End Semester and `1` for Intermediate.
 - The app uses `Asia/Kolkata` for displayed and selected schedule times. New
   schedules are set to 10:00 AM IST; the schedule date defaults to tomorrow.
+- The schedule section links to the PSG Tech academic calendar at
+  `https://academicschedule.psgtech.ac.in/`.
 - Scheduled times are stored in UTC. The schedule table converts them back to
   IST for display.
 - Local development uses SQLite (`feedback_jobs.sqlite3` by default;
@@ -117,6 +119,9 @@ can change.
   and secrets in both Streamlit Cloud and GitHub Actions. The cloud migration
   script is available but must be run by the user after setting the same Fernet
   key and database URL; do not run it without explicit instruction.
+- `.github/workflows/keep-streamlit-awake.yml` requests the deployed Streamlit
+  URL hourly. This is best-effort only; Community Cloud may still suspend or
+  restart the app according to its hosting policies.
 - The worker checks all schedules due at or before its run time, so late or
   missed schedules can be picked up by a later invocation.
 - Previously saved jobs retain their original scheduled timestamps when the

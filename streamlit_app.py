@@ -23,6 +23,7 @@ from settings import load_streamlit_secrets
 
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
+ACADEMIC_CALENDAR_URL = "https://academicschedule.psgtech.ac.in/"
 st.set_page_config(page_title="Feedback Automation", page_icon="📝", layout="centered")
 
 
@@ -217,6 +218,9 @@ if st.button("🚀 Submit Feedback", type="primary"):
 
 st.divider()
 st.subheader("Schedule Feedback")
+st.markdown(
+    f"[View your academic calendar here]({ACADEMIC_CALENDAR_URL})"
+)
 schedule_date = st.date_input(
     "Feedback availability date (runs at 10:00 AM IST)",
     value=datetime.now(LOCAL_TIMEZONE).date() + timedelta(days=1),
