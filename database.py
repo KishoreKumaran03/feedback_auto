@@ -1,13 +1,17 @@
 import os
+import secrets
 import sqlite3
-import hashlib
-import hmac
 from contextlib import closing
 from datetime import datetime, timezone
 from email.utils import parseaddr
 from pathlib import Path
 
-from cryptography.fernet import Fernet, InvalidToken
+LEGACY_ENCRYPTED_COLUMNS = {
+    "roll_number_lookup",
+    "roll_number_encrypted",
+    "password_encrypted",
+    "email_encrypted",
+}
 
 
 def _database_path() -> Path:
@@ -85,8 +89,8 @@ def _initialize_postgres() -> None:
             """
             CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 id BIGSERIAL PRIMARY KEY,
-                roll_number_encrypted BYTEA NOT NULL,
-                password_encrypted BYTEA NOT NULL,
+                roll_number TEXT NOT NULL,
+                password TEXT NOT NULL,
                 feedback_type INTEGER NOT NULL CHECK (feedback_type IN (0, 1)),
                 scheduled_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending'
@@ -99,10 +103,9 @@ def _initialize_postgres() -> None:
             """
             CREATE TABLE IF NOT EXISTS saved_credentials (
                 id BIGSERIAL PRIMARY KEY,
-                roll_number_lookup TEXT NOT NULL UNIQUE,
-                roll_number_encrypted BYTEA NOT NULL,
-                password_encrypted BYTEA NOT NULL,
-                email_encrypted BYTEA,
+                roll_number TEXT NOT NULL,
+                password TEXT NOT NULL,
+                email TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -148,9 +151,21 @@ def _initialize_postgres() -> None:
             "CREATE INDEX IF NOT EXISTS idx_feedback_schedules_due "
             "ON feedback_schedules(status, scheduled_at)"
         )
-        connection.execute(
-            "ALTER TABLE saved_credentials ADD COLUMN IF NOT EXISTS email_encrypted BYTEA"
+        _require_plain_credentials(
+            {
+                row[0]
+                for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name IN ('saved_credentials', 'scheduled_jobs')"
+                ).fetchall()
+            }
         )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_credentials_roll_number "
+            "ON saved_credentials(lower(roll_number))"
+        )
+        connection.execute("ALTER TABLE saved_credentials ADD COLUMN IF NOT EXISTS email TEXT")
         connection.execute(
             "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_status TEXT "
             "NOT NULL DEFAULT 'not_configured'"
@@ -161,29 +176,23 @@ def _initialize_postgres() -> None:
         )
 
 
-def _cipher() -> Fernet:
-    key = os.environ.get("FEEDBACK_ENCRYPTION_KEY")
-    if not key:
-        raise RuntimeError("Set FEEDBACK_ENCRYPTION_KEY to a Fernet key before storing credentials.")
-    try:
-        return Fernet(key.encode("ascii"))
-    except (ValueError, UnicodeEncodeError) as error:
-        raise RuntimeError("FEEDBACK_ENCRYPTION_KEY is not a valid Fernet key.") from error
+def _require_plain_credentials(column_names: set[str]) -> None:
+    if column_names & LEGACY_ENCRYPTED_COLUMNS:
+        raise RuntimeError(
+            "The database still has encrypted credential columns. Decrypt them into the "
+            "plain roll_number, password, and email columns before starting the app."
+        )
 
 
-def validate_encryption_key() -> None:
-    _cipher()
+def _normalize_roll_number(roll_number: str) -> str:
+    return roll_number.strip().lower()
 
 
-def _roll_number_lookup(roll_number: str) -> str:
-    key = os.environ.get("FEEDBACK_ENCRYPTION_KEY")
-    if not key:
-        raise RuntimeError("Set FEEDBACK_ENCRYPTION_KEY to a Fernet key before storing credentials.")
-    return hmac.new(
-        key.encode("ascii"),
-        roll_number.strip().casefold().encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+def _normalize_email(email: str) -> str:
+    normalized_email = email.strip()
+    if parseaddr(normalized_email)[1] != normalized_email or "@" not in normalized_email:
+        raise ValueError("Enter a valid email address.")
+    return normalized_email
 
 
 def initialize_database(database_path: str | Path | None = None) -> None:
@@ -201,8 +210,8 @@ def initialize_database(database_path: str | Path | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                roll_number_encrypted BLOB NOT NULL,
-                password_encrypted BLOB NOT NULL,
+                roll_number TEXT NOT NULL,
+                password TEXT NOT NULL,
                 feedback_type INTEGER NOT NULL CHECK (feedback_type IN (0, 1)),
                 scheduled_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending'
@@ -215,10 +224,9 @@ def initialize_database(database_path: str | Path | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS saved_credentials (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                roll_number_lookup TEXT NOT NULL UNIQUE,
-                roll_number_encrypted BLOB NOT NULL,
-                password_encrypted BLOB NOT NULL,
-                email_encrypted BLOB,
+                roll_number TEXT NOT NULL,
+                password TEXT NOT NULL,
+                email TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -274,10 +282,16 @@ def initialize_database(database_path: str | Path | None = None) -> None:
         credential_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(saved_credentials)")
         }
-        if "email_encrypted" not in credential_columns:
-            connection.execute(
-                "ALTER TABLE saved_credentials ADD COLUMN email_encrypted BLOB"
-            )
+        _require_plain_credentials(
+            credential_columns
+            | {row[1] for row in connection.execute("PRAGMA table_info(scheduled_jobs)")}
+        )
+        if "email" not in credential_columns:
+            connection.execute("ALTER TABLE saved_credentials ADD COLUMN email TEXT")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_credentials_roll_number "
+            "ON saved_credentials(lower(roll_number))"
+        )
         notification_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(notifications)")
         }
@@ -316,11 +330,7 @@ def save_credentials(
     if not normalized_roll_number or not password:
         raise ValueError("Roll number and password are required.")
 
-    cipher = _cipher()
-    roll_number_lookup = _roll_number_lookup(normalized_roll_number)
-    encrypted_roll_number = cipher.encrypt(normalized_roll_number.encode("utf-8"))
-    encrypted_password = cipher.encrypt(password.encode("utf-8"))
-    encrypted_email = _encrypt_email(email) if email else None
+    normalized_email = _normalize_email(email) if email else None
     path = database_path
     initialize_database(path)
 
@@ -329,22 +339,13 @@ def save_credentials(
             return _insert_id(
                 connection,
                 """
-                INSERT INTO saved_credentials (
-                    roll_number_lookup, roll_number_encrypted, password_encrypted,
-                    email_encrypted
-                ) VALUES (?, ?, ?, ?)
+                INSERT INTO saved_credentials (roll_number, password, email)
+                VALUES (?, ?, ?)
                 """,
-                (roll_number_lookup, encrypted_roll_number, encrypted_password, encrypted_email),
+                (normalized_roll_number, password, normalized_email),
             )
     except sqlite3.IntegrityError as error:
         raise ValueError("A profile already exists for this roll number. Sign in instead.") from error
-
-
-def _encrypt_email(email: str) -> bytes:
-    normalized_email = email.strip()
-    if parseaddr(normalized_email)[1] != normalized_email or "@" not in normalized_email:
-        raise ValueError("Enter a valid email address.")
-    return _cipher().encrypt(normalized_email.encode("utf-8"))
 
 
 def get_account_email(
@@ -353,28 +354,23 @@ def get_account_email(
     path = database_path
     with closing(_connect(path)) as connection:
         row = connection.execute(
-            "SELECT email_encrypted FROM saved_credentials WHERE id = ?",
+            "SELECT email FROM saved_credentials WHERE id = ?",
             (credential_id,),
         ).fetchone()
     if row is None:
         raise LookupError("Saved account was not found.")
-    if row[0] is None:
-        return None
-    try:
-        return _cipher().decrypt(bytes(row[0])).decode("utf-8")
-    except InvalidToken as error:
-        raise RuntimeError("Could not decrypt email; check the encryption key.") from error
+    return str(row[0]) if row[0] is not None else None
 
 
 def save_account_email(
     credential_id: int, email: str, database_path: str | Path | None = None
 ) -> None:
-    encrypted_email = _encrypt_email(email)
+    normalized_email = _normalize_email(email)
     path = database_path
     with closing(_connect(path)) as connection, connection:
         cursor = connection.execute(
-            "UPDATE saved_credentials SET email_encrypted = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (encrypted_email, credential_id),
+            "UPDATE saved_credentials SET email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (normalized_email, credential_id),
         )
         if cursor.rowcount != 1:
             raise LookupError("Saved account was not found.")
@@ -386,43 +382,35 @@ def authenticate_saved_account(
     password: str,
     database_path: str | Path | None = None,
 ) -> tuple[int, str] | None:
-    cipher = _cipher()
-    roll_number_lookup = _roll_number_lookup(roll_number)
     path = database_path
 
     with closing(_connect(path)) as connection:
         row = connection.execute(
             """
-            SELECT id, roll_number_encrypted, password_encrypted
+            SELECT id, roll_number, password
             FROM saved_credentials
-            WHERE roll_number_lookup = ?
+            WHERE lower(roll_number) = ?
             """,
-            (roll_number_lookup,),
+            (_normalize_roll_number(roll_number),),
         ).fetchone()
 
     if row is None:
         return None
 
-    try:
-        saved_roll_number = cipher.decrypt(bytes(row[1])).decode("utf-8")
-        saved_password = cipher.decrypt(bytes(row[2])).decode("utf-8")
-    except InvalidToken as error:
-        raise RuntimeError("Could not decrypt credentials; check the encryption key.") from error
-    if not hmac.compare_digest(saved_password, password):
+    if not secrets.compare_digest(str(row[2]).encode("utf-8"), password.encode("utf-8")):
         return None
-    return int(row[0]), saved_roll_number
+    return int(row[0]), str(row[1])
 
 
 def load_saved_credentials_by_id(
     credential_id: int, database_path: str | Path | None = None
 ) -> tuple[str, str]:
-    cipher = _cipher()
     path = database_path
 
     with closing(_connect(path)) as connection:
         row = connection.execute(
             """
-            SELECT roll_number_encrypted, password_encrypted
+            SELECT roll_number, password
             FROM saved_credentials
             WHERE id = ?
             """,
@@ -431,13 +419,7 @@ def load_saved_credentials_by_id(
 
     if row is None:
         raise LookupError("Saved credentials were not found.")
-    try:
-        return (
-            cipher.decrypt(bytes(row[0])).decode("utf-8"),
-            cipher.decrypt(bytes(row[1])).decode("utf-8"),
-        )
-    except InvalidToken as error:
-        raise RuntimeError("Could not decrypt credentials; check the encryption key.") from error
+    return str(row[0]), str(row[1])
 
 
 def create_feedback_schedule(
@@ -671,9 +653,6 @@ def save_scheduled_job(
     if scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None:
         raise ValueError("scheduled_at must include a timezone.")
 
-    cipher = _cipher()
-    encrypted_roll_number = cipher.encrypt(roll_number.encode("utf-8"))
-    encrypted_password = cipher.encrypt(password.encode("utf-8"))
     scheduled_at_utc = scheduled_at.astimezone(timezone.utc).isoformat()
     path = database_path
     initialize_database(path)
@@ -682,24 +661,22 @@ def save_scheduled_job(
         return _insert_id(
             connection,
             """
-            INSERT INTO scheduled_jobs (
-                roll_number_encrypted, password_encrypted, feedback_type, scheduled_at
-            ) VALUES (?, ?, ?, ?)
+            INSERT INTO scheduled_jobs (roll_number, password, feedback_type, scheduled_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (encrypted_roll_number, encrypted_password, feedback_type, scheduled_at_utc),
+            (roll_number.strip(), password, feedback_type, scheduled_at_utc),
         )
 
 
 def load_job_credentials(
     job_id: int, database_path: str | Path | None = None
 ) -> tuple[str, str]:
-    cipher = _cipher()
     path = database_path
 
     with closing(_connect(path)) as connection:
         row = connection.execute(
             """
-            SELECT roll_number_encrypted, password_encrypted
+            SELECT roll_number, password
             FROM scheduled_jobs
             WHERE id = ?
             """,
@@ -708,10 +685,4 @@ def load_job_credentials(
 
     if row is None:
         raise LookupError(f"Scheduled job {job_id} was not found.")
-
-    try:
-        roll_number = cipher.decrypt(bytes(row[0])).decode("utf-8")
-        password = cipher.decrypt(bytes(row[1])).decode("utf-8")
-    except InvalidToken as error:
-        raise RuntimeError("Could not decrypt credentials; check the encryption key.") from error
-    return roll_number, password
+    return str(row[0]), str(row[1])

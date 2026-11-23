@@ -25,9 +25,16 @@ can change.
 - In Postgres mode, job claiming uses row locks with `SKIP LOCKED`; SQLite uses
   `BEGIN IMMEDIATE`. The worker still uses a local file lock for duplicate
   processes on one machine.
-- Saved portal credentials and optional email addresses are encrypted with
-  Fernet. `FEEDBACK_ENCRYPTION_KEY` is required; keep it private and back it up.
-  Roll numbers also have a keyed HMAC lookup value for account matching.
+- Saved portal credentials and optional email addresses are stored as plain
+  text (`saved_credentials.roll_number`, `password`, `email`; legacy
+  `scheduled_jobs.roll_number`, `password`). There is no encryption and no
+  `FEEDBACK_ENCRYPTION_KEY`. Sign-in matches roll numbers case-insensitively
+  through a unique index on `lower(roll_number)`.
+- Encryption was removed on 2026-11-23. The Supabase rows were decrypted in
+  place with a one-time script (not kept in the repo) and the old
+  `roll_number_lookup` / `*_encrypted` columns were dropped. `initialize_database`
+  refuses to start if those legacy columns still exist, so an old encrypted
+  database must be decrypted before this code can use it.
 
 ## Main flow and files
 
@@ -39,13 +46,13 @@ can change.
   It runs Chrome headless, signs in, opens Feedback, then performs the selected
   form. It always closes the browser in a `finally` block. It expects the portal
   selectors and page structure currently encoded in this file.
-- `database.py`: schema creation/migrations, encrypted credential and email
+- `database.py`: schema creation/migrations, plain-text credential and email
   storage, authentication, UTC schedule storage, due-job claiming, job results,
   and account-scoped notifications. A DB-API adapter selects SQLite locally or
   Postgres when the URL is configured. The schedule status can be `pending`,
   `running`, `completed`, or `failed`; `result` describes the outcome.
 - `worker.py`: one-shot scheduled worker. It gets due jobs in a loop, atomically
-  claims them, loads that account's decrypted credentials, runs automation,
+  claims them, loads that account's saved credentials, runs automation,
   records the outcome, and creates in-app/email notifications. A cross-platform
   file lock prevents two worker copies from processing jobs at once.
 - `notification_delivery.py`: writes the in-app notification first, then tries
@@ -56,14 +63,11 @@ can change.
 - `settings.py`: loads the known top-level Streamlit secrets into environment
   variables so the database and SMTP modules can share configuration with the
   GitHub Actions worker.
-- `migrate_sqlite_to_postgres.py`: optional, idempotent copy of local encrypted
-  database rows to configured Postgres; it has not been run. Keep the same
-  encryption key when migrating.
 - `.streamlit/secrets.example.toml`: safe template only; real `secrets.toml` is
   ignored by Git.
 - `.github/workflows/run-feedback.yml`: GitHub Actions worker at 10:00 AM IST
   (`04:30 UTC`) plus manual dispatch. It expects repository secrets for the
-  database URL, encryption key, and optional SMTP settings.
+  database URL and optional SMTP settings.
 
 ## Feedback outcomes
 
@@ -86,7 +90,7 @@ can change.
 ## Email behavior
 
 - Email is optional. Add or update the email address in the profile. Email
-  addresses are encrypted in SQLite.
+  addresses are stored as plain text.
 - Set these Windows User environment variables for the Windows account that
   runs both Streamlit and Task Scheduler:
   - `FEEDBACK_SMTP_HOST`
@@ -102,7 +106,7 @@ can change.
 - Templates exist for successful feedback, general failure, and missing
   Intermediate form. Missing-form email includes the scheduled time converted to
   IST when available.
-- Do not put SMTP passwords, portal passwords, or encryption keys in code or
+- Do not put SMTP passwords, portal passwords, or database URLs in code or
   documentation. Restart long-running app/task processes after changing
   environment variables so they receive the new values.
 
@@ -116,9 +120,7 @@ can change.
   working directory. It runs once and exits; `StartWhenAvailable` is enabled.
 - For Community Cloud, the GitHub Actions workflow is the scheduler because
   Streamlit Community Cloud apps hibernate when idle. Configure Supabase Postgres
-  and secrets in both Streamlit Cloud and GitHub Actions. The cloud migration
-  script is available but must be run by the user after setting the same Fernet
-  key and database URL; do not run it without explicit instruction.
+  and secrets in both Streamlit Cloud and GitHub Actions.
 - `.github/workflows/keep-streamlit-awake.yml` requests the deployed Streamlit
   URL hourly. This is best-effort only; Community Cloud may still suspend or
   restart the app according to its hosting policies.
@@ -143,28 +145,28 @@ can change.
 
 ## Community Cloud configuration
 
-- Set these Streamlit Cloud secrets: `FEEDBACK_DATABASE_MODE="postgres"`,
-  `FEEDBACK_DATABASE_URL`, and `FEEDBACK_ENCRYPTION_KEY`; SMTP settings are
-  optional. App code maps top-level secrets to environment variables in
-  `settings.py`.
-- Set the database URL, encryption key, and any SMTP settings as GitHub Actions
-  repository secrets for the worker.
+- Set these Streamlit Cloud secrets: `FEEDBACK_DATABASE_MODE="postgres"` and
+  `FEEDBACK_DATABASE_URL`; SMTP settings are optional. App code maps top-level
+  secrets to environment variables in `settings.py`. A leftover
+  `FEEDBACK_ENCRYPTION_KEY` secret is ignored and can be deleted.
+- Set the database URL and any SMTP settings as GitHub Actions repository
+  secrets for the worker.
 - Use `.streamlit/secrets.example.toml` as the local template; never commit real
   secrets or `.streamlit/secrets.toml`.
 - `requirements.txt` pins the runtime libraries. `packages.txt` contains Debian
   Chromium and chromedriver packages used by the Community Cloud app.
 - `FEEDBACK_DATABASE_MODE=postgres` with a missing URL fails fast rather than
   silently creating an ephemeral SQLite database.
-- The local SQLite database is gitignored. Migration to Postgres is opt-in and
-  copies encrypted values without exposing them; source and destination need the
-  same key to keep credentials usable.
+- The local SQLite database is gitignored. The SQLite-to-Postgres copy script
+  was deleted on 2026-11-23 because Supabase is the live database and no local
+  SQLite data needed copying; local SQLite and Supabase data are separate.
 - App profile sign-in is separate from Streamlit Cloud viewer authentication.
   Restrict the deployed app if it is intended only for a known group.
 
 ## Reuse for another automation
 
-The reusable pattern is: Streamlit profile/UI -> encrypted account data in
-SQLite -> UTC schedule rows -> daily/periodic one-shot worker -> atomic claim and
+The reusable pattern is: Streamlit profile/UI -> account data in
+SQLite/Postgres -> UTC schedule rows -> daily/periodic one-shot worker -> atomic claim and
 lock -> browser/API automation -> durable outcome -> in-app notification and
 optional SMTP email. Keep the automation-specific form interaction separate
 from scheduling, persistence, and notifications. Define explicit error types

@@ -1,8 +1,12 @@
 # Feedback automation
 
 Streamlit app for End Semester and Intermediate feedback. It stores account
-credentials encrypted, allows manual or scheduled runs, records outcomes, and
-can send optional email notifications.
+credentials, allows manual or scheduled runs, records outcomes, and can send
+optional email notifications.
+
+Roll numbers, portal passwords, and email addresses are stored as plain text in
+the database (no encryption). Anyone with database access can read them, so keep
+the database URL private and limit who can open the Supabase project.
 
 ## Local development
 
@@ -13,10 +17,6 @@ Install dependencies and run the app with:
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
 ```
-
-Set `FEEDBACK_ENCRYPTION_KEY` as a Windows User environment variable before
-creating profiles. Keep the key private and back it up: without the original key,
-stored portal credentials and email addresses cannot be decrypted.
 
 ## Deploy to Streamlit Community Cloud
 
@@ -40,55 +40,26 @@ same keys and values into the app's **Settings → Secrets** panel:
 
 - `FEEDBACK_DATABASE_MODE = "postgres"`
 - `FEEDBACK_DATABASE_URL = "..."` (Supabase connection string)
-- `FEEDBACK_ENCRYPTION_KEY = "..."` (the same key used by the local app if
-  existing encrypted accounts will be migrated)
 - Optional SMTP values: `FEEDBACK_SMTP_HOST`, `FEEDBACK_SMTP_PORT`,
   `FEEDBACK_SMTP_USERNAME`, `FEEDBACK_SMTP_PASSWORD`, and `FEEDBACK_SMTP_FROM`
 
-Generate a Fernet key if starting fresh:
+Never add real credentials, database URLs, or `.streamlit/secrets.toml` to the
+repository.
 
-```powershell
-.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-Store the generated value securely in Streamlit Cloud and GitHub Actions secrets.
-Never add real credentials, keys, database URLs, or `.streamlit/secrets.toml` to
-the repository.
-
-### 3. Migrate existing local records (optional)
-
-If existing profiles or notifications should remain available in the deployed
-app, migrate the local SQLite records before using the cloud app. In PowerShell,
-set these process environment variables for the migration shell, using the same
-database URL and encryption key configured in both cloud services:
-
-```powershell
-$env:FEEDBACK_DATABASE_MODE = "postgres"
-$env:FEEDBACK_DATABASE_URL = "your Supabase connection string"
-$env:FEEDBACK_ENCRYPTION_KEY = "your existing Fernet key"
-.\.venv\Scripts\python.exe migrate_sqlite_to_postgres.py
-```
-
-The migration copies encrypted credentials, profiles, schedules, and
-notifications while preserving record IDs. It does not decrypt or print portal
-credentials. It is safe to rerun for IDs already copied. If starting with a
-fresh cloud database, skip this step and create profiles in the deployed app.
-
-### 4. Deploy the Streamlit app
+### 3. Deploy the Streamlit app
 
 Push the project to a GitHub repository, then create a Streamlit Community Cloud
 app using `streamlit_app.py` as the entry point. Add the secrets above before
 using the app. Streamlit Community Cloud installs Python packages from
 `requirements.txt` and Linux packages from `packages.txt`.
 
-### 5. Enable scheduled feedback
+### 4. Enable scheduled feedback
 
 The included `.github/workflows/run-feedback.yml` runs the worker daily at
 10:00 AM IST (04:30 UTC) and supports manual runs from GitHub Actions. Add these
 repository **Actions secrets**:
 
 - `FEEDBACK_DATABASE_URL`
-- `FEEDBACK_ENCRYPTION_KEY`
 - Optional SMTP settings matching the app secrets
 
 The workflow serializes runs and processes all due jobs from Supabase. Keep it

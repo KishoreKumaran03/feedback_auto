@@ -16,7 +16,6 @@ from database import (
     mark_notifications_read,
     save_account_email,
     save_credentials,
-    validate_encryption_key,
 )
 from notification_delivery import notify_feedback_outcome
 from settings import load_streamlit_secrets
@@ -29,7 +28,6 @@ st.set_page_config(page_title="Feedback Automation", page_icon="📝", layout="c
 
 @st.cache_resource
 def _initialize_storage() -> None:
-    validate_encryption_key()
     initialize_database()
 
 try:
@@ -63,7 +61,7 @@ def _create_profile() -> None:
     password = st.session_state.pop("new_password", "")
     email = st.session_state.get("new_email", "").strip() or None
     if not st.session_state.get("store_consent", False):
-        st.session_state["auth_error"] = "Consent is required to save encrypted credentials."
+        st.session_state["auth_error"] = "Consent is required to save credentials."
         return
     try:
         credential_id = save_credentials(roll_number, password, email=email)
@@ -84,7 +82,7 @@ if "credential_id" not in st.session_state:
         st.form_submit_button("Sign in", type="primary", on_click=_sign_in)
 
     with st.expander("Create a local profile"):
-        st.caption("Your roll number and password are encrypted and used for eCampus automation.")
+        st.caption("Your roll number and password are saved and used for eCampus automation.")
         with st.form("create_profile_form"):
             st.text_input("Roll Number", key="new_roll_number")
             st.text_input("Password", type="password", key="new_password")
@@ -94,7 +92,7 @@ if "credential_id" not in st.session_state:
                 key="new_email",
             )
             st.checkbox(
-                "I consent to saving these credentials and optional email encrypted.",
+                "I consent to saving these credentials and optional email.",
                 key="store_consent",
             )
             st.form_submit_button("Create profile", on_click=_create_profile)
@@ -173,7 +171,7 @@ with status_columns[2]:
                 except Exception as error:
                     st.error(str(error))
                 else:
-                    st.success("Email address saved encrypted.")
+                    st.success("Email address saved.")
         if st.button("Sign out", key="sign_out"):
             st.session_state.pop("credential_id", None)
             st.session_state.pop("roll_number", None)

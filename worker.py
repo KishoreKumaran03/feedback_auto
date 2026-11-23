@@ -13,7 +13,6 @@ from database import (
     finish_feedback_schedule,
     initialize_database,
     load_saved_credentials_by_id,
-    validate_encryption_key,
 )
 from notification_delivery import notify_feedback_outcome
 
@@ -107,7 +106,6 @@ def main() -> None:
         logging.warning("Another feedback worker is already running; this instance will exit.")
         return
     try:
-        validate_encryption_key()
         initialize_database()
         logging.info("Checking for feedback schedules due at 10:00 AM IST.")
         processed = run_due_schedules_once()
