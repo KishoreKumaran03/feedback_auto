@@ -1,0 +1,27 @@
+name: Keep Streamlit app awake
+
+on:
+  schedule:
+    # Keep the Community Cloud app active with an hourly request.
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      APP_URL: https://feedbackauto-egqh2ndy5ytnzaiybl7gmh.streamlit.app/
+    steps:
+      - name: Request the app
+        shell: bash
+        run: |
+          status_code="$(curl --silent --show-error --output /dev/null \
+            --max-time 30 --retry 2 --write-out "%{http_code}" "$APP_URL")"
+          case "$status_code" in
+            2*|3*) echo "Streamlit responded with HTTP $status_code." ;;
+            *) echo "Streamlit responded with HTTP $status_code."; exit 1 ;;
+          esac

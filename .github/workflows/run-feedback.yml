@@ -1,0 +1,42 @@
+name: Run scheduled feedback
+
+on:
+  schedule:
+    # 10:00 AM India Standard Time (UTC+05:30).
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feedback-worker
+  cancel-in-progress: false
+
+jobs:
+  run-feedback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FEEDBACK_DATABASE_MODE: postgres
+      FEEDBACK_DATABASE_URL: ${{ secrets.FEEDBACK_DATABASE_URL }}
+      FEEDBACK_ENCRYPTION_KEY: ${{ secrets.FEEDBACK_ENCRYPTION_KEY }}
+      FEEDBACK_SMTP_HOST: ${{ secrets.FEEDBACK_SMTP_HOST }}
+      FEEDBACK_SMTP_PORT: ${{ secrets.FEEDBACK_SMTP_PORT }}
+      FEEDBACK_SMTP_USERNAME: ${{ secrets.FEEDBACK_SMTP_USERNAME }}
+      FEEDBACK_SMTP_PASSWORD: ${{ secrets.FEEDBACK_SMTP_PASSWORD }}
+      FEEDBACK_SMTP_FROM: ${{ secrets.FEEDBACK_SMTP_FROM }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Process due feedback schedules
+        run: python worker.py
