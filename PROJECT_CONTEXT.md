@@ -34,7 +34,11 @@ can change.
   place with a one-time script (not kept in the repo) and the old
   `roll_number_lookup` / `*_encrypted` columns were dropped. `initialize_database`
   refuses to start if those legacy columns still exist, so an old encrypted
-  database must be decrypted before this code can use it.
+  database must be decrypted before this code can use it. Old (pre-removal)
+  app code re-adds an empty `email_encrypted` column on startup; this happened
+  once before the new code was deployed and the empty column was dropped. If
+  the startup guard fires again, check whether any copy of the old code is still
+  running against the same database.
 
 ## Main flow and files
 
