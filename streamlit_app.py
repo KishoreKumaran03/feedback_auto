@@ -22,6 +22,8 @@ from settings import load_streamlit_secrets
 
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
+# Must match the GitHub Actions cron in .github/workflows/run-feedback.yml.
+SCHEDULE_TIME = datetime_time(0, 37)
 ACADEMIC_CALENDAR_URL = "https://academicschedule.psgtech.ac.in/"
 st.set_page_config(page_title="Feedback Automation", page_icon="📝", layout="centered")
 
@@ -59,7 +61,10 @@ def _sign_in() -> None:
 def _create_profile() -> None:
     roll_number = st.session_state.get("new_roll_number", "").strip()
     password = st.session_state.pop("new_password", "")
-    email = st.session_state.get("new_email", "").strip() or None
+    email = st.session_state.get("new_email", "").strip()
+    if not email:
+        st.session_state["auth_error"] = "Email address is required."
+        return
     if not st.session_state.get("store_consent", False):
         st.session_state["auth_error"] = "Consent is required to save credentials."
         return
@@ -87,12 +92,12 @@ if "credential_id" not in st.session_state:
             st.text_input("Roll Number", key="new_roll_number")
             st.text_input("Password", type="password", key="new_password")
             st.text_input(
-                "Email notifications (optional)",
+                "Email",
                 placeholder="student@example.edu",
                 key="new_email",
             )
             st.checkbox(
-                "I consent to saving these credentials and optional email.",
+                "I consent to saving these credentials and email.",
                 key="store_consent",
             )
             st.form_submit_button("Create profile", on_click=_create_profile)
@@ -105,6 +110,23 @@ if "credential_id" not in st.session_state:
 credential_id = st.session_state["credential_id"]
 roll_number = st.session_state["roll_number"]
 account_email = get_account_email(credential_id)
+if not account_email:
+    st.title("📝 Feedback Automation")
+    st.warning("Add your email address to continue. It is required for feedback notifications.")
+    with st.form("required_email_form"):
+        required_email = st.text_input("Email", placeholder="student@example.edu")
+        if st.form_submit_button("Save email", type="primary"):
+            try:
+                save_account_email(credential_id, required_email)
+            except Exception as error:
+                st.error(str(error))
+            else:
+                st.rerun()
+    if st.button("Sign out", key="sign_out_missing_email"):
+        st.session_state.pop("credential_id", None)
+        st.session_state.pop("roll_number", None)
+        st.rerun()
+    st.stop()
 notifications = list_notifications(credential_id)
 unread_count = count_unread_notifications(credential_id)
 feedback_notifications = [
@@ -161,8 +183,8 @@ with status_columns[2]:
         st.markdown(f"**{roll_number}**")
         with st.form(f"email_settings_{credential_id}"):
             email_value = st.text_input(
-                "Email notifications",
-                value=account_email or "",
+                "Email",
+                value=account_email,
                 placeholder="student@example.edu",
             )
             if st.form_submit_button("Save email"):
@@ -219,12 +241,19 @@ st.subheader("Schedule Feedback")
 st.markdown(
     f"[View your academic calendar here]({ACADEMIC_CALENDAR_URL})"
 )
+now_local = datetime.now(LOCAL_TIMEZONE)
+today_local = now_local.date()
+earliest_schedule_date = (
+    today_local
+    if now_local.time() < SCHEDULE_TIME
+    else today_local + timedelta(days=1)
+)
 schedule_date = st.date_input(
     "Feedback availability date",
-    value=datetime.now(LOCAL_TIMEZONE).date() + timedelta(days=1),
-    min_value=datetime.now(LOCAL_TIMEZONE).date(),
+    value=today_local + timedelta(days=1),
+    min_value=earliest_schedule_date,
 )
-scheduled_at = datetime.combine(schedule_date, datetime_time(10, 0), tzinfo=LOCAL_TIMEZONE)
+scheduled_at = datetime.combine(schedule_date, SCHEDULE_TIME, tzinfo=LOCAL_TIMEZONE)
 
 if st.button("🗓️ Schedule Feedback"):
     try:

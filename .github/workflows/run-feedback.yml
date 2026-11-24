@@ -2,8 +2,9 @@ name: Run scheduled feedback
 
 on:
   schedule:
-    # 10:00 AM India Standard Time (UTC+05:30).
-    - cron: "30 4 * * *"
+    # 12:37 AM India Standard Time (UTC+05:30) = 19:07 UTC the previous day.
+    # Keep in sync with SCHEDULE_TIME in streamlit_app.py.
+    - cron: "7 19 * * *"
   workflow_dispatch:
 
 permissions:

@@ -107,9 +107,9 @@ def main() -> None:
         return
     try:
         initialize_database()
-        logging.info("Checking for feedback schedules due at 10:00 AM IST.")
+        logging.info("Checking for feedback schedules due at 12:37 AM IST.")
         processed = run_due_schedules_once()
-        logging.info("10:00 AM check finished; processed %s due job(s).", processed)
+        logging.info("12:37 AM check finished; processed %s due job(s).", processed)
     finally:
         lock_file.close()
 

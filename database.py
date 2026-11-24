@@ -330,7 +330,9 @@ def save_credentials(
     if not normalized_roll_number or not password:
         raise ValueError("Roll number and password are required.")
 
-    normalized_email = _normalize_email(email) if email else None
+    if not email or not email.strip():
+        raise ValueError("Email address is required.")
+    normalized_email = _normalize_email(email)
     path = database_path
     initialize_database(path)
 

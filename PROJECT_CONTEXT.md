@@ -12,7 +12,9 @@ can change.
   or schedule a run for a date.
 - The two feedback type values are `0` for End Semester and `1` for Intermediate.
 - The app uses `Asia/Kolkata` for displayed and selected schedule times. New
-  schedules are set to 10:00 AM IST; the schedule date defaults to tomorrow.
+  schedules are set to 12:37 AM IST (`SCHEDULE_TIME` in `streamlit_app.py`);
+  the schedule date defaults to tomorrow. Today is only selectable before
+  12:37 AM IST. The time is not shown in the date picker label.
 - The schedule section links to the PSG Tech academic calendar at
   `https://academicschedule.psgtech.ac.in/`.
 - Scheduled times are stored in UTC. The schedule table converts them back to
@@ -25,7 +27,7 @@ can change.
 - In Postgres mode, job claiming uses row locks with `SKIP LOCKED`; SQLite uses
   `BEGIN IMMEDIATE`. The worker still uses a local file lock for duplicate
   processes on one machine.
-- Saved portal credentials and optional email addresses are stored as plain
+- Saved portal credentials and email addresses are stored as plain
   text (`saved_credentials.roll_number`, `password`, `email`; legacy
   `scheduled_jobs.roll_number`, `password`). There is no encryption and no
   `FEEDBACK_ENCRYPTION_KEY`. Sign-in matches roll numbers case-insensitively
@@ -69,8 +71,9 @@ can change.
   GitHub Actions worker.
 - `.streamlit/secrets.example.toml`: safe template only; real `secrets.toml` is
   ignored by Git.
-- `.github/workflows/run-feedback.yml`: GitHub Actions worker at 10:00 AM IST
-  (`04:30 UTC`) plus manual dispatch. It expects repository secrets for the
+- `.github/workflows/run-feedback.yml`: GitHub Actions worker at 12:37 AM IST
+  (cron `7 19 * * *`, 19:07 UTC the previous day) plus manual dispatch. Keep
+  the cron and `SCHEDULE_TIME` in sync, otherwise jobs wait for a later run. It expects repository secrets for the
   database URL and optional SMTP settings.
 
 ## Feedback outcomes
@@ -93,8 +96,12 @@ can change.
 
 ## Email behavior
 
-- Email is optional. Add or update the email address in the profile. Email
-  addresses are stored as plain text.
+- Email is required (since 2026-11-24). Profile creation rejects a missing
+  email in both the UI and `save_credentials`, and it cannot be cleared later.
+  Older accounts saved without an email are shown an "add your email" form after
+  sign-in and cannot use the app until they save one. Email addresses are
+  stored as plain text. SMTP settings are still optional: without them, emails
+  are not sent but in-app notifications still work.
 - Set these Windows User environment variables for the Windows account that
   runs both Streamlit and Task Scheduler:
   - `FEEDBACK_SMTP_HOST`
@@ -116,10 +123,12 @@ can change.
 
 ## Schedule and worker hosting
 
-- The Streamlit UI sets newly created schedules to **10:00 AM IST**.
+- The Streamlit UI sets newly created schedules to **12:37 AM IST** (changed
+  from 10:00 AM IST on 2026-11-24; no pending jobs existed at the change).
 - On the project machine, the daily Windows task is named
   `FeedbackAuto355PM` (the name is historical; it has not been renamed). Its
-  trigger was changed to 10:00 AM IST on 2026-10-18. It starts the virtual
+  trigger was changed to 10:00 AM IST on 2026-10-18. As of 2026-11-24 the task
+  is disabled and was not moved to 12:37 AM; GitHub Actions is the scheduler. It starts the virtual
   environment's Python executable with `worker.py`, using this project as the
   working directory. It runs once and exits; `StartWhenAvailable` is enabled.
 - For Community Cloud, the GitHub Actions workflow is the scheduler because

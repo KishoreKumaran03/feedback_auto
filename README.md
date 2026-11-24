@@ -1,8 +1,8 @@
 # Feedback automation
 
 Streamlit app for End Semester and Intermediate feedback. It stores account
-credentials, allows manual or scheduled runs, records outcomes, and can send
-optional email notifications.
+credentials and a required email address, allows manual or scheduled runs,
+records outcomes, and sends email notifications when SMTP is configured.
 
 Roll numbers, portal passwords, and email addresses are stored as plain text in
 the database (no encryption). Anyone with database access can read them, so keep
@@ -56,7 +56,8 @@ using the app. Streamlit Community Cloud installs Python packages from
 ### 4. Enable scheduled feedback
 
 The included `.github/workflows/run-feedback.yml` runs the worker daily at
-10:00 AM IST (04:30 UTC) and supports manual runs from GitHub Actions. Add these
+12:37 AM IST (19:07 UTC the previous day) and supports manual runs from GitHub
+Actions. Add these
 repository **Actions secrets**:
 
 - `FEEDBACK_DATABASE_URL`
