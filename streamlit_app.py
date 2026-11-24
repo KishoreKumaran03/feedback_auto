@@ -220,7 +220,7 @@ st.markdown(
     f"[View your academic calendar here]({ACADEMIC_CALENDAR_URL})"
 )
 schedule_date = st.date_input(
-    "Feedback availability date (runs at 10:00 AM IST)",
+    "Feedback availability date",
     value=datetime.now(LOCAL_TIMEZONE).date() + timedelta(days=1),
     min_value=datetime.now(LOCAL_TIMEZONE).date(),
 )
